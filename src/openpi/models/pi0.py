@@ -284,10 +284,10 @@ class Pi0(_model.BaseModel):
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
         positions = jnp.cumsum(prefix_mask, axis=1) - 1
-        _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
-
+        _, logits = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
+        
         def step(carry):
-            x_t, time = carry
+            x_t, time, masked_logits = carry
             suffix_tokens, suffix_mask, suffix_ar_mask = self.embed_suffix(
                 observation, x_t, jnp.broadcast_to(time, batch_size)
             )
@@ -308,18 +308,24 @@ class Pi0(_model.BaseModel):
             # `positions` is shape (b, suffix_len) indicating the positions of the suffix tokens
             positions = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
 
-            (prefix_out, suffix_out), _ = self.PaliGemma.llm(
-                [None, suffix_tokens], mask=full_attn_mask, positions=positions, kv_cache=kv_cache
-            )
+            (prefix_out, suffix_out), kv_cache_and_logits = self.PaliGemma.llm(
+                [None, suffix_tokens], mask=full_attn_mask, positions=positions, kv_cache=logits
+            ) # here, the output logits is the attn weight each action tokens paid to the prefix tokens (a.k.a. the VLM kv cache)
             assert prefix_out is None
             v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
-            return x_t + dt * v_t, time + dt
+            _, cur_masked_logits = kv_cache_and_logits
+            
+            if masked_logits is not None:
+                masked_logits = jnp.concatenate([masked_logits, cur_masked_logits], axis=0)
+            
+            return x_t + dt * v_t, time + dt, masked_logits
 
         def cond(carry):
-            x_t, time = carry
+            _, time, _ = carry
             # robust to floating-point error
             return time >= -dt / 2
 
-        x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
-        return x_0
+        masked_logits_of_all_diffusion_steps = []
+        x_0, _, masked_logits_of_all_diffusion_steps = jax.lax.while_loop(cond, step, (noise, 1.0, None))
+        return x_0, masked_logits_of_all_diffusion_steps

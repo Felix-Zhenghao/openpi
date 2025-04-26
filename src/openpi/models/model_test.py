@@ -20,7 +20,7 @@ def test_pi0_model():
     loss = nnx_utils.module_jit(model.compute_loss)(key, obs, act)
     assert loss.shape == (batch_size, config.action_horizon)
 
-    actions = nnx_utils.module_jit(model.sample_actions)(key, obs, num_steps=10)
+    actions, masked_logits_of_all_diffusion_steps = nnx_utils.module_jit(model.sample_actions)(key, obs, num_steps=10)
     assert actions.shape == (batch_size, model.action_horizon, model.action_dim)
 
 
@@ -92,3 +92,7 @@ def test_model_restore():
 
     actions = model.sample_actions(key, obs, num_steps=10)
     assert actions.shape == (batch_size, model.action_horizon, model.action_dim)
+
+
+if __name__ == "__main__":
+    test_pi0_model()

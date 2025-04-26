@@ -153,7 +153,7 @@ class Attention(nn.Module):
     configs: Sequence[Config]
 
     @nn.compact
-    def __call__(self, xs, positions, attn_mask, kv_cache):
+    def __call__(self, xs, positions, attn_mask, kv_cache_and_masked_logits):
         # all experts must share the same head dim, num heads, and num kv heads for self-attention to work
         assert all(config.head_dim == self.configs[0].head_dim for config in self.configs)
         assert all(config.num_heads == self.configs[0].num_heads for config in self.configs)
@@ -200,6 +200,8 @@ class Attention(nn.Module):
         # should still be half-precision here (if input was half-precision)
         assert q.dtype == k.dtype == v.dtype == dtype
 
+        kv_cache, previous_masked_logits = kv_cache_and_masked_logits
+        
         if kv_cache is not None:
             cache_k, cache_v = kv_cache
             k = jnp.concatenate([cache_k, k], axis=1)
@@ -216,6 +218,12 @@ class Attention(nn.Module):
         # big_neg = jnp.finfo(logits.dtype).min
         big_neg = -2.3819763e38  # See gemma/modules.py
         masked_logits = jnp.where(attn_mask[:, :, None, :, :], logits, big_neg)
+        
+        # NOTE: it is a little bit hacky for `previous_masked_logits.shape[-1] != previous_masked_logits.shape[-2]`
+        # here, we only want to get the logits of action tokens paid attention to the VLM tokens.
+        # since the `masked_logits` has shape `(num_layer, bsz, num_q_head, out_seq_len, in_seq_len)`, we use the last 2 dim to filter
+        if previous_masked_logits is not None and previous_masked_logits.shape[-1] != previous_masked_logits.shape[-2]:
+            masked_logits = jnp.concatenate([previous_masked_logits, masked_logits], axis=0)
 
         probs = jax.nn.softmax(masked_logits, axis=-1).astype(dtype)
 
@@ -238,7 +246,7 @@ class Attention(nn.Module):
             else:
                 out.append(None)
 
-        return out, (k, v)
+        return out, ((k, v), masked_logits)
 
 
 @at.typecheck
@@ -282,7 +290,7 @@ class Block(nn.Module):
     dropout_bdims: tuple[int, ...] = ()
 
     @nn.compact
-    def __call__(self, xs, kv_cache, positions, attn_mask, decode, deterministic=True):  # noqa: FBT002
+    def __call__(self, xs, kv_cache_and_logits, positions, attn_mask, decode, deterministic=True):  # noqa: FBT002
         xs = sharding.activation_sharding_constraint(xs)
         drop = nn.Dropout(self.dropout, self.dropout_bdims) if self.dropout else lambda x, _: x
 
@@ -295,7 +303,7 @@ class Block(nn.Module):
             pre_attn.append(x)
 
         pre_attn = sharding.activation_sharding_constraint(pre_attn)
-        post_attn, kv_cache = attn(pre_attn, positions, attn_mask, kv_cache)
+        post_attn, kv_cache_and_masked_logits = attn(pre_attn, positions, attn_mask, kv_cache_and_logits)
         post_attn = jax.tree.map(lambda x: drop(x, deterministic), post_attn)
         post_attn = sharding.activation_sharding_constraint(post_attn)
         xs = jax.tree.map(lambda x, y: x + y, xs, post_attn)
@@ -319,10 +327,11 @@ class Block(nn.Module):
         xs = jax.tree.map(lambda x, y: x + y, xs, out)
         xs = sharding.activation_sharding_constraint(xs)
 
-        return xs, kv_cache
+        return xs, kv_cache_and_masked_logits
 
 
 KVCache: TypeAlias = tuple[at.Float[at.Array, "l b _t _k _h"], at.Float[at.Array, "l b _t _v _h"]]
+KVCacheAndLogits: TypeAlias = tuple[KVCache, at.Float[at.Array, "l b _kv _q _s _t"]]
 
 
 @at.typecheck
@@ -375,17 +384,19 @@ class Module(nn.Module):
         positions: at.Int[at.Array, "b t"],
         mask: at.Bool[at.Array, "b t s"],
         *,
-        kv_cache: KVCache | None = None,
+        kv_cache: KVCacheAndLogits | None = (None, None), # actually should be called `kv_cache_and_masked_logits`
         deterministic: bool = True,
-    ) -> tuple[Sequence[at.Float[at.Array, "b _t _d"] | None], KVCache]:
+    ) -> tuple[Sequence[at.Float[at.Array, "b _t _d"] | None], KVCacheAndLogits]:
+        """The output logits: [num_layers, batch, num_kv_heads, num_heads, out_seq_len (query_len), in_seq_len (kv_len)].
+           The kv_len and query_len maybe different. For instance, kv_len is VLM kv cache length, and query_len is the action token len."""
         embedded = jax.tree.map(lambda e: e.astype(self.embed_dtype), embedded)
         mask = jnp.asarray(mask)[:, None, :, :]
 
-        embedded, kv_cache = self.layers(embedded, kv_cache, positions, mask, deterministic)
+        embedded, kv_cache_and_logtis = self.layers(embedded, kv_cache, positions, mask, deterministic)
 
         assert all(e.dtype == jnp.dtype(self.embed_dtype) for e in embedded if e is not None)
 
-        return [f(e) if e is not None else e for f, e in zip(self.final_norms, embedded, strict=True)], kv_cache
+        return [f(e) if e is not None else e for f, e in zip(self.final_norms, embedded, strict=True)], kv_cache_and_logtis
 
     def init(self):
         """Convenience method for initializing all parameters, necessary due to the quirks of linen."""
