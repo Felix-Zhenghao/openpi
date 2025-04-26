@@ -1,6 +1,7 @@
 from flax import nnx
 import jax
 import pytest
+from termcolor import cprint
 
 from openpi.models import model as _model
 from openpi.models import pi0
@@ -21,6 +22,8 @@ def test_pi0_model():
     assert loss.shape == (batch_size, config.action_horizon)
 
     actions, masked_logits_of_all_diffusion_steps = nnx_utils.module_jit(model.sample_actions)(key, obs, num_steps=10)
+    cprint(f"{masked_logits_of_all_diffusion_steps.shape=}. This is the shape of all attn weights of all attn layers of all diffusion steps.\nMeaning: [diffusion_steps, num_layers, bsz, num_kv_head, num_query_head, VLM_kv_len, action_kv_len].", color="green")
+    
     assert actions.shape == (batch_size, model.action_horizon, model.action_dim)
 
 

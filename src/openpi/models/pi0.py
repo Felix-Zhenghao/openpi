@@ -286,8 +286,8 @@ class Pi0(_model.BaseModel):
         positions = jnp.cumsum(prefix_mask, axis=1) - 1
         _, logits = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
         
-        def step(carry):
-            x_t, time, masked_logits = carry
+        def step(carry, step_idx):
+            x_t, time = carry
             suffix_tokens, suffix_mask, suffix_ar_mask = self.embed_suffix(
                 observation, x_t, jnp.broadcast_to(time, batch_size)
             )
@@ -316,16 +316,14 @@ class Pi0(_model.BaseModel):
 
             _, cur_masked_logits = kv_cache_and_logits
             
-            if masked_logits is not None:
-                masked_logits = jnp.concatenate([masked_logits, cur_masked_logits], axis=0)
-            
-            return x_t + dt * v_t, time + dt, masked_logits
+            return (x_t + dt * v_t, time + dt), cur_masked_logits
 
-        def cond(carry):
-            _, time, _ = carry
-            # robust to floating-point error
-            return time >= -dt / 2
-
-        masked_logits_of_all_diffusion_steps = []
-        x_0, _, masked_logits_of_all_diffusion_steps = jax.lax.while_loop(cond, step, (noise, 1.0, None))
-        return x_0, masked_logits_of_all_diffusion_steps
+        (x_0, _), masked_logits_of_all_diffusion_steps = jax.lax.scan(
+            f=step, 
+            init=(noise, 1.0),
+            xs=None,
+            length=10,
+        )
+        
+        return x_0, masked_logits_of_all_diffusion_steps # [diffusion_steps, num_layers, bsz, num_kv_head, num_query_head, VLM_kv_len, action_kv_len]
+        
