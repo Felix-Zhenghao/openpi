@@ -55,7 +55,7 @@ class Policy(BasePolicy):
 
         # Unbatch and convert to np.ndarray.
         outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
-        return self._output_transform(outputs), logits
+        return self._output_transform(outputs), np.asarray(logits)
 
     @property
     def metadata(self) -> dict[str, Any]:
