@@ -1,3 +1,15 @@
+# How to visualize attention
+
+## Step 1
+
+Launch the policy server and client as mentioned in the following `3. Spinning up a policy server and running inference`.
+
+## Step 2
+
+Wait and see! The main code lives in `example/libero/main.py` and `example/libero/attention_viz.py`.
+
+
+
 # openpi
 
 openpi holds open-source models and packages for robotics, published by the [Physical Intelligence team](https://www.physicalintelligence.company/).
